@@ -1,5 +1,4 @@
-ARG BUILD_FROM=ghcr.io/home-assistant/aarch64-base:latest
-FROM $BUILD_FROM AS build
+FROM python:3.12.11-slim-bookworm AS build
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1

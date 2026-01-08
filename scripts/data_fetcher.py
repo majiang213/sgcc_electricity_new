@@ -1,7 +1,6 @@
 import logging
 import os
 import re
-import subprocess
 import time
 
 import random
@@ -103,34 +102,43 @@ class DataFetcher:
             os.getenv("ENABLE_DATABASE_STORAGE", "false").lower() == "true"
         )
         self.DRIVER_IMPLICITY_WAIT_TIME = int(
-            os.getenv("DRIVER_IMPLICITY_WAIT_TIME", 60)
+            os.getenv("DRIVER_IMPLICITY_WAIT_TIME", 20)
         )
         self.RETRY_TIMES_LIMIT = int(os.getenv("RETRY_TIMES_LIMIT", 5))
         self.LOGIN_EXPECTED_TIME = int(os.getenv("LOGIN_EXPECTED_TIME", 10))
         self.RETRY_WAIT_TIME_OFFSET_UNIT = int(
-            os.getenv("RETRY_WAIT_TIME_OFFSET_UNIT", 10)
+            os.getenv("RETRY_WAIT_TIME_OFFSET_UNIT", 3)
+        )
+        self.POLL_FREQUENCY = (
+            0.5  # 针对树莓派平衡：既不过快占用 CPU，又能及时捕捉 UI 变化
         )
         self.IGNORE_USER_ID = os.getenv("IGNORE_USER_ID", "xxxxx,xxxxx").split(",")
 
     # @staticmethod
-    def _click_button(self, driver, button_search_type, button_search_key):
+    def _click_button(
+        self, driver, button_search_type, button_search_key, wait_loading=True
+    ):
         """wrapped click function, click only when the element is clickable"""
+        if wait_loading:
+            try:
+                # 等待可能存在的 loading 遮罩消失
+                WebDriverWait(driver, 5, self.POLL_FREQUENCY).until(
+                    EC.invisibility_of_element_located(
+                        (By.CLASS_NAME, "el-loading-mask")
+                    )
+                )
+            except Exception:
+                # 如果 5 秒内还没消失，可能是它根本没出现，或者卡住了，尝试继续
+                pass
+
         click_element = driver.find_element(button_search_type, button_search_key)
         # logging.info(f"click_element:{button_search_key}.is_displayed() = {click_element.is_displayed()}\r")
         # logging.info(f"click_element:{button_search_key}.is_enabled() = {click_element.is_enabled()}\r")
-        WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
-            EC.element_to_be_clickable(click_element)
-        )
+        WebDriverWait(
+            driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
+        ).until(EC.element_to_be_clickable(click_element))
         driver.execute_script("arguments[0].click();", click_element)
 
-    # @staticmethod
-    def _is_captcha_legal(self, captcha):
-        """check the ddddocr result, justify whether it's legal"""
-        if len(captcha) != 4:
-            return False
-        for s in captcha:
-            if not s.isalpha() and not s.isdigit():
-                return False
         return True
 
     # @staticmethod
@@ -220,34 +228,45 @@ class DataFetcher:
             firefox_options.add_argument("--window-size=1280,720")
             firefox_options.add_argument("--disable-software-rasterizer")
             firefox_options.add_argument("--memory-pressure-thresholds=10,50")
-            logging.info(f"Open Firefox.\r")
+
+            # 针对树莓派优化：禁用图片加载以节省 CPU 和内存
+            firefox_options.set_preference("permissions.default.image", 2)
+            # 针对树莓派优化：禁用 Flash（如果还存在的话）
+            firefox_options.set_preference(
+                "dom.ipc.plugins.enabled.libflashplayer.so", "false"
+            )
+
+            logging.info("Open Firefox.\r")
             driver = webdriver.Firefox(
                 options=firefox_options, service=FirefoxService()
             )
-            driver.implicitly_wait(self.DRIVER_IMPLICITY_WAIT_TIME)
+            # 设置页面加载超时
+            driver.set_page_load_timeout(30)
+            # 【关键】针对生产环境彻底弃用隐式等待，完全依赖显式等待以避免冲突导致的“死亡等待”
+            driver.implicitly_wait(0)
         return driver
 
     @ErrorWatcher.watch
     def _login(self, driver, phone_code=False):
         try:
+            logging.info(f"Open LOGIN_URL:{LOGIN_URL} ...\r")
             driver.get(LOGIN_URL)
-            WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+            # 等待核心元素出现
+            WebDriverWait(driver, 20, self.POLL_FREQUENCY).until(
                 EC.visibility_of_element_located((By.CLASS_NAME, "user"))
             )
         except Exception as e:
-            logging.error(
-                f"Login failed, could not find '.user' element on {LOGIN_URL}. Error: {e}"
-            )
+            logging.error(f"Login timeout or failed: {e}")
             return False
-        logging.info(f"Open LOGIN_URL:{LOGIN_URL}.\r")
-        time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT * 2)
-        # swtich to username-password login page
-        driver.find_element(By.CLASS_NAME, "user").click()
-        logging.info("find_element 'user'.\r")
+
+        self._click_button(driver, By.CLASS_NAME, "user")
+        logging.info("Click 'user' button done.\r")
+        time.sleep(1)  # 防风控：模拟人工操作间隔
+        # 仅仅在第一次尝试时点击切换到账号登录，后续重试应直接在原位刷新
         self._click_button(
             driver, By.XPATH, '//*[@id="login_box"]/div[1]/div[1]/div[2]/span'
         )
-        time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+        time.sleep(1)  # 防风控：模拟人工操作间隔
         # click agree button
         self._click_button(
             driver,
@@ -255,7 +274,7 @@ class DataFetcher:
             '//*[@id="login_box"]/div[2]/div[1]/form/div[1]/div[3]/div/span[2]',
         )
         logging.info("Click the Agree option.\r")
-        time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+        time.sleep(1)  # 防风控：模拟人工操作间隔
         if phone_code:
             self._click_button(
                 driver, By.XPATH, '//*[@id="login_box"]/div[1]/div[1]/div[3]/span'
@@ -286,18 +305,17 @@ class DataFetcher:
             input_elements = driver.find_elements(By.CLASS_NAME, "el-input__inner")
             input_elements[0].send_keys(self._username)
             logging.info(f"input_elements username : {self._username}\r")
+            time.sleep(0.5)  # 防风控：输入账号后短暂等待
             input_elements[1].send_keys(self._password)
             logging.info(f"input_elements password : {self._password}\r")
+            time.sleep(1)  # 防风控：输入密码后等待
 
             # click login button
             self._click_button(driver, By.CLASS_NAME, "el-button.el-button--primary")
-            time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT * 2)
             logging.info("Click login button.\r")
             # sometimes ddddOCR may fail, so add retry logic)
             for retry_times in range(1, self.RETRY_TIMES_LIMIT + 1):
-                self._click_button(
-                    driver, By.XPATH, '//*[@id="login_box"]/div[1]/div[1]/div[2]/span'
-                )
+                # 移除此处循环内的 tab 切换点击，它可能导致登录框重置或消失
                 # get canvas image
                 background_JS = 'return document.getElementById("slideVerify").childNodes[0].toDataURL("image/png");'
                 # targe_JS = 'return document.getElementsByClassName("slide-verify-block")[0].toDataURL("image/png");'
@@ -310,7 +328,19 @@ class DataFetcher:
                 logging.info(f"Image CaptCHA distance is {distance}.\r")
 
                 self._sliding_track(driver, round(distance * 1.06))  # 1.06是补偿
-                time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+
+                # [树莓派优化] 替换原来的 time.sleep(2)。
+                # 给足 10 秒等待后端验证和页面跳转。如果 10 秒内 URL 变了，立即返回成功；
+                # 如果 10 秒后还在老 URL，才判定为失败。
+                try:
+                    WebDriverWait(driver, 10, self.POLL_FREQUENCY).until(
+                        EC.url_changes(LOGIN_URL)
+                    )
+                    return True  # URL 变了，说明登录成功
+                except Exception:
+                    # 获取超时，说明 URL 没变，认定为验证失败
+                    pass
+
                 if driver.current_url == LOGIN_URL:  # if login not success
                     try:
                         logging.info(
@@ -321,7 +351,7 @@ class DataFetcher:
                         )
                         time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT * 2)
                         continue
-                    except:
+                    except Exception:
                         logging.debug(
                             f"Login failed, maybe caused by invalid captcha, {self.RETRY_TIMES_LIMIT - retry_times} retry times left."
                         )
@@ -342,7 +372,6 @@ class DataFetcher:
         driver = self._get_webdriver()
         ErrorWatcher.instance().set_driver(driver)
 
-        time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
         logging.info("Webdriver initialized.")
         updator = SensorUpdator()
 
@@ -367,7 +396,19 @@ class DataFetcher:
             return
 
         logging.info(f"Login successfully on {LOGIN_URL}")
-        time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+
+        # 登录成功后先跳转到余额页面，确保户号下拉菜单可用
+        logging.info(f"Navigating to BALANCE_URL to load user dropdown...")
+        try:
+            driver.get(BALANCE_URL)
+            WebDriverWait(
+                driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
+            ).until(EC.presence_of_element_located((By.CLASS_NAME, "el-dropdown")))
+        except Exception as e:
+            logging.warning(
+                f"Failed to navigate to BALANCE_URL: {e}, will try to get userid anyway."
+            )
+
         logging.info(f"Try to get the userid list")
         user_id_list = self._get_user_ids(driver)
         if not user_id_list:
@@ -381,15 +422,17 @@ class DataFetcher:
         logging.info(
             f"Here are a total of {len(user_id_list)} userids, which are {user_id_list} among which {self.IGNORE_USER_ID} will be ignored."
         )
-        time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
 
         for userid_index, user_id in enumerate(user_id_list):
             try:
                 # switch to electricity charge balance page
                 driver.get(BALANCE_URL)
-                time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+                # 等待页面中的核心元素出现，避免死等
+                WebDriverWait(
+                    driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
+                ).until(EC.presence_of_element_located((By.CLASS_NAME, "num")))
                 self._choose_current_userid(driver, userid_index)
-                time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+                time.sleep(1)  # 切换用户后的 DOM 更新缓冲
                 current_userid = self._get_current_userid(driver)
                 if current_userid in self.IGNORE_USER_ID:
                     logging.info(
@@ -446,9 +489,7 @@ class DataFetcher:
                 By.XPATH,
                 f"""//*[@id="app"]/div/div[2]/div/div/div/div[2]/div[2]/div/button""",
             )
-        time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
         self._click_button(driver, By.CLASS_NAME, "el-input__suffix")
-        time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
         self._click_button(
             driver,
             By.XPATH,
@@ -466,9 +507,12 @@ class DataFetcher:
         time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
         # swithc to electricity usage page
         driver.get(ELECTRIC_USAGE_URL)
-        time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+        # 等待页面加载完成
+        WebDriverWait(
+            driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
+        ).until(EC.presence_of_element_located((By.CLASS_NAME, "el-tabs__header")))
         self._choose_current_userid(driver, userid_index)
-        time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+        time.sleep(1)
         # get data for each user id
         yearly_usage, yearly_charge = self._get_yearly_data(driver)
 
@@ -552,8 +596,7 @@ class DataFetcher:
 
     def _get_user_ids(self, driver):
         try:
-            # 刷新网页改为显式等待，避免低内存环境 refresh 崩溃
-            time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+            # 显式等待下拉菜单出现
             element = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
                 EC.presence_of_element_located((By.CLASS_NAME, "el-dropdown"))
             )
@@ -562,28 +605,13 @@ class DataFetcher:
             logging.debug(
                 f"""self._click_button(driver, By.XPATH, "//div[@class='el-dropdown']/span")"""
             )
-            time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
-            # wait for roll down menu displayed
-            target = driver.find_element(
-                By.CLASS_NAME, "el-dropdown-menu.el-popper"
-            ).find_element(By.TAG_NAME, "li")
-            logging.debug(
-                f"""target = driver.find_element(By.CLASS_NAME, "el-dropdown-menu.el-popper").find_element(By.TAG_NAME, "li")"""
-            )
-            time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
-            WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
-                EC.visibility_of(target)
-            )
-            time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
-            logging.debug(
-                f"""WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(target))"""
-            )
-            WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+            WebDriverWait(
+                driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
+            ).until(
                 EC.text_to_be_present_in_element(
                     (By.XPATH, "//ul[@class='el-dropdown-menu el-popper']/li"), ":"
                 )
             )
-            time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
 
             # get user id one by one
             userid_elements = driver.find_element(
@@ -599,13 +627,17 @@ class DataFetcher:
 
     def _get_electric_balance(self, driver):
         try:
+            # 等待余额数值可见
+            WebDriverWait(
+                driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
+            ).until(EC.visibility_of_element_located((By.CLASS_NAME, "num")))
             balance = driver.find_element(By.CLASS_NAME, "num").text
             balance_text = driver.find_element(By.CLASS_NAME, "amttxt").text
             if "欠费" in balance_text:
                 return -float(balance)
             else:
                 return float(balance)
-        except:
+        except Exception:
             return None
 
     def _get_yearly_data(self, driver):
@@ -617,17 +649,16 @@ class DataFetcher:
                         By.XPATH,
                         '//*[@id="pane-first"]/div[1]/div/div[1]/div/div/input',
                     )
-                    time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
                     year_val = str(datetime.now().year - 1)
                     span_element = WebDriverWait(
-                        driver, self.RETRY_WAIT_TIME_OFFSET_UNIT
+                        driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
                     ).until(
                         EC.element_to_be_clickable(
                             (By.XPATH, f"//span[contains(text(), '{year_val}')]")
                         )
                     )
                     span_element.click()
-                    time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+                    time.sleep(1)
                 except Exception as e:
                     logging.warning(
                         f"Failed to switch to previous year data: {e}. Continuing with current view."
@@ -637,12 +668,10 @@ class DataFetcher:
                 By.XPATH,
                 "//div[@class='el-tabs__nav is-top']/div[@id='tab-first']",
             )
-            time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
             # wait for data displayed
-            target = driver.find_element(By.CLASS_NAME, "total")
-            WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
-                EC.visibility_of(target)
-            )
+            WebDriverWait(
+                driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
+            ).until(EC.visibility_of_element_located((By.CLASS_NAME, "total")))
         except Exception as e:
             logging.error(f"The yearly data get failed : {e}")
             return None, None
@@ -675,15 +704,21 @@ class DataFetcher:
                 By.XPATH,
                 "//div[@class='el-tabs__nav is-top']/div[@id='tab-second']",
             )
-            time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
             # wait for data displayed
+            WebDriverWait(
+                driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
+            ).until(
+                EC.visibility_of_element_located(
+                    (
+                        By.XPATH,
+                        "//div[@class='el-tab-pane dayd']//div[@class='el-table__body-wrapper is-scrolling-none']/table/tbody/tr[1]/td[2]/div",
+                    )
+                )
+            )  # 等待用电量出现
             usage_element = driver.find_element(
                 By.XPATH,
                 "//div[@class='el-tab-pane dayd']//div[@class='el-table__body-wrapper is-scrolling-none']/table/tbody/tr[1]/td[2]/div",
             )
-            WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
-                EC.visibility_of(usage_element)
-            )  # 等待用电量出现
 
             # 增加是哪一天
             date_element = driver.find_element(
@@ -705,7 +740,6 @@ class DataFetcher:
                 By.XPATH,
                 "//div[@class='el-tabs__nav is-top']/div[@id='tab-first']",
             )
-            time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
             if datetime.now().month == 1:
                 try:
                     self._click_button(
@@ -713,26 +747,24 @@ class DataFetcher:
                         By.XPATH,
                         '//*[@id="pane-first"]/div[1]/div/div[1]/div/div/input',
                     )
-                    time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
                     year_val = str(datetime.now().year - 1)
                     span_element = WebDriverWait(
-                        driver, self.RETRY_WAIT_TIME_OFFSET_UNIT
+                        driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
                     ).until(
                         EC.element_to_be_clickable(
                             (By.XPATH, f"//span[contains(text(), '{year_val}')]")
                         )
                     )
                     span_element.click()
-                    time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+                    time.sleep(1)
                 except Exception as e:
                     logging.warning(
                         f"Failed to switch to previous year for month data: {e}"
                     )
             # wait for month displayed
-            target = driver.find_element(By.CLASS_NAME, "total")
-            WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
-                EC.visibility_of(target)
-            )
+            WebDriverWait(
+                driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
+            ).until(EC.visibility_of_element_located((By.CLASS_NAME, "total")))
             month_element = driver.find_element(
                 By.XPATH,
                 "//*[@id='pane-first']/div[1]/div[2]/div[2]/div/div[3]/table/tbody",
@@ -777,15 +809,16 @@ class DataFetcher:
             logging.error(f"Unsupported retention days value: {retention_days}")
             return
 
-        time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
-
         # 等待用电量的数据出现
-        usage_element = driver.find_element(
-            By.XPATH,
-            "//div[@class='el-tab-pane dayd']//div[@class='el-table__body-wrapper is-scrolling-none']/table/tbody/tr[1]/td[2]/div",
-        )
-        WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
-            EC.visibility_of(usage_element)
+        WebDriverWait(
+            driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
+        ).until(
+            EC.visibility_of_element_located(
+                (
+                    By.XPATH,
+                    "//div[@class='el-tab-pane dayd']//div[@class='el-table__body-wrapper is-scrolling-none']/table/tbody/tr[1]/td[2]/div",
+                )
+            )
         )
 
         # 获取用电量的数据
