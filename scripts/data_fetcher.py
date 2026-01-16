@@ -410,11 +410,58 @@ class DataFetcher:
             )
 
         logging.info(f"Try to get the userid list")
-        user_id_list = self._get_user_ids(driver)
-        if not user_id_list:
+        import importlib
+        import scraper_utils
+
+        # Initial fetch attempt
+        user_id_list = scraper_utils.get_user_ids(
+            driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
+        )
+
+        # Interactive retry loop to avoid re-login
+        while not user_id_list:
             logging.error(
-                "Failed to get user id list, browser might have crashed or session expired."
+                "Failed to get user id list. Entering interactive debug mode."
             )
+            print("\n" + "!" * 50)
+            print("ERROR: Could not fetch user IDs.")
+            print("Options:")
+            print("  [r] Retry fetching user IDs (refresh page)")
+            print("  [u] Update/Reload code (updates scraper_utils.py)")
+            print("  [d] Dump page source to 'debug_manual.html'")
+            print("  [i] Inspect (just wait 60s)")
+            print("  [q] Quit (closes browser)")
+            choice = input("Enter choice: ").strip().lower()
+
+            if choice == "r":
+                logging.info("User chose to retry...")
+                driver.refresh()
+                time.sleep(5)
+                user_id_list = scraper_utils.get_user_ids(
+                    driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
+                )
+            elif choice == "u":
+                logging.info("Reloading scraper_utils module...")
+                importlib.reload(scraper_utils)
+                logging.info("Module reloaded. Retrying...")
+                driver.refresh()
+                time.sleep(5)
+                # Use the reloaded module
+                user_id_list = scraper_utils.get_user_ids(
+                    driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
+                )
+            elif choice == "d":
+                with open("debug_manual.html", "w", encoding="utf-8") as f:
+                    f.write(driver.page_source)
+                print("Saved to debug_manual.html")
+            elif choice == "i":
+                print("Waiting 60 seconds... you can inspect the browser if visible.")
+                time.sleep(60)
+            elif choice == "q":
+                break
+
+        if not user_id_list:
+            logging.error("Failed to get user id list, and user chose to quit.")
             if driver:
                 driver.quit()
             return
@@ -595,35 +642,80 @@ class DataFetcher:
         )
 
     def _get_user_ids(self, driver):
-        try:
-            # 显式等待下拉菜单出现
-            element = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
-                EC.presence_of_element_located((By.CLASS_NAME, "el-dropdown"))
-            )
-            # click roll down button for user id
-            self._click_button(driver, By.XPATH, "//div[@class='el-dropdown']/span")
-            logging.debug(
-                f"""self._click_button(driver, By.XPATH, "//div[@class='el-dropdown']/span")"""
-            )
-            WebDriverWait(
-                driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
-            ).until(
-                EC.text_to_be_present_in_element(
-                    (By.XPATH, "//ul[@class='el-dropdown-menu el-popper']/li"), ":"
+        for attempt in range(1, 4):
+            try:
+                logging.info(f"Trying to get user IDs, attempt {attempt}...")
+                logging.info(f"Current URL: {driver.current_url}")
+                # 显式等待下拉菜单出现
+                try:
+                    WebDriverWait(
+                        driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
+                    ).until(
+                        EC.visibility_of_element_located((By.CLASS_NAME, "el-dropdown"))
+                    )
+                except Exception as wait_e:
+                    logging.warning(f"Wait for el-dropdown failed: {wait_e}")
+                    try:
+                        with open("debug_page_source.html", "w", encoding="utf-8") as f:
+                            f.write(driver.page_source)
+                        logging.info("Dumped page source to debug_page_source.html")
+                    except Exception:
+                        pass
+                    raise wait_e
+                # click roll down button for user id
+                self._click_button(
+                    driver, By.XPATH, "//div[contains(@class, 'el-dropdown')]/span"
                 )
-            )
+                logging.debug(
+                    f"""self._click_button(driver, By.XPATH, "//div[contains(@class, 'el-dropdown')]/span")"""
+                )
 
-            # get user id one by one
-            userid_elements = driver.find_element(
-                By.CLASS_NAME, "el-dropdown-menu.el-popper"
-            ).find_elements(By.TAG_NAME, "li")
-            userid_list = []
-            for element in userid_elements:
-                userid_list.append(re.findall("[0-9]+", element.text)[-1])
-            return userid_list
-        except Exception as e:
-            logging.error(f"Webdriver exception occurred in _get_user_ids: {e}")
-            return []
+                # 等待下拉内容加载
+                WebDriverWait(
+                    driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
+                ).until(
+                    EC.text_to_be_present_in_element(
+                        (By.XPATH, "//ul[contains(@class, 'el-dropdown-menu')]/li"), ":"
+                    )
+                )
+
+                # get user id one by one
+                # 使用更宽泛的选择器避免精确匹配 class 失败
+                dropdown_menu = driver.find_element(
+                    By.XPATH, "//ul[contains(@class, 'el-dropdown-menu')]"
+                )
+                userid_elements = dropdown_menu.find_elements(By.TAG_NAME, "li")
+
+                userid_list = []
+                for element in userid_elements:
+                    text = element.text
+                    # 确保提取到的是包含数字的有效文本
+                    numbers = re.findall("[0-9]+", text)
+                    if numbers:
+                        userid_list.append(numbers[-1])
+
+                if userid_list:
+                    return userid_list
+                else:
+                    logging.warning(f"Attempt {attempt}: User ID list found empty.")
+
+            except Exception as e:
+                logging.warning(
+                    f"Webdriver exception in _get_user_ids (attempt {attempt}): {e}"
+                )
+
+            # 如果失败，且不是最后一次尝试，则刷新页面重试
+            if attempt < 3:
+                logging.info("Refreshing page to retry...")
+                try:
+                    driver.refresh()
+                    # 刷新后需要等待页面重新加载完毕
+                    time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+                except Exception as refresh_error:
+                    logging.error(f"Failed to refresh page: {refresh_error}")
+
+        logging.error("Failed to get user id list after 3 attempts.")
+        return []
 
     def _get_electric_balance(self, driver):
         try:
