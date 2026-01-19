@@ -237,9 +237,11 @@ class DataFetcher:
             )
 
             logging.info("Open Firefox.\r")
-            driver = webdriver.Firefox(
-                options=firefox_options, service=FirefoxService()
-            )
+            service = FirefoxService()
+            if os.path.exists("/usr/bin/geckodriver"):
+                service = FirefoxService(executable_path="/usr/bin/geckodriver")
+
+            driver = webdriver.Firefox(options=firefox_options, service=service)
             # 设置页面加载超时
             driver.set_page_load_timeout(30)
             # 【关键】针对生产环境彻底弃用隐式等待，完全依赖显式等待以避免冲突导致的“死亡等待”

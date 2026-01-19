@@ -10,7 +10,7 @@ host_network: true
 startup: application
 boot: auto
 init: false
-image: "ghcr.io/majiang213/sgcc_electricity-{arch}"
+image: "crpi-nsw3mx3pnbkqn9j5.cn-beijing.personal.cr.aliyuncs.com/majiang213/sgcc_electricity"
 map:
   # - addons:rw
   - config:rw
@@ -30,6 +30,10 @@ options:
   RECHARGE_NOTIFY: false
   BALANCE: 5.0
   PUSHPLUS_TOKEN: "xxxx,xxxx"
+  LOG_LEVEL: "INFO"
+  RETRY_TIMES_LIMIT: 5
+  DRIVER_IMPLICITY_WAIT_TIME: 60
+  LOGIN_EXPECTED_TIME: 10
 schema:
   PHONE_NUMBER: str
   PASSWORD: password
@@ -44,3 +48,7 @@ schema:
   RECHARGE_NOTIFY: bool 
   BALANCE: float 
   PUSHPLUS_TOKEN: str
+  LOG_LEVEL: list(DEBUG|INFO|WARNING|ERROR|CRITICAL)
+  RETRY_TIMES_LIMIT: int(1,20)
+  DRIVER_IMPLICITY_WAIT_TIME: int(10,300)
+  LOGIN_EXPECTED_TIME: int(5,60)

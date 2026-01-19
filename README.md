@@ -84,8 +84,15 @@
 
   token获取方法参考[https://blog.csdn.net/qq_25886111/article/details/106282492](https://blog.csdn.net/qq_25886111/article/details/106282492)
 
-## 3）docker镜像部署，速度快
+## 3）安装方式
+2.1 Home Assistant Add-on 安装
+1. 打开 Home Assistant -> 配置 -> 加载项 (Add-ons) -> 加载项商店。
+2. 点击右上角菜单 -> 仓库 (Repositories)。
+3. 添加仓库地址：`https://github.com/majiang213/sgcc_electricity_new`
+4. 刷新页面，搜索 "SGCC Electricity" 并安装。
+5. 在配置页填入手机号和密码，启动即可。
 
+2.2 docker镜像部署
 1. 安装docker和homeassistant，[Homeassistant极简安装法](https://github.com/renhaiidea/easy-homeassistant)。
 2. 克隆仓库
 
