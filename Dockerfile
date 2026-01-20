@@ -1,4 +1,4 @@
-FROM python:3.12.11-slim-bookworm AS build
+FROM docker.m.daocloud.io/library/python:3.12.11-slim-bookworm AS build
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -15,7 +15,7 @@ ENV PYTHON_IN_DOCKER='PYTHON_IN_DOCKER'
 COPY scripts/* /app/
 WORKDIR /app
 
-RUN apt-get --allow-releaseinfo-change update \
+RUN apt-get -o Acquire::Check-Valid-Until=false -o Acquire::Check-Date=false --allow-releaseinfo-change update \
     && apt-get install -y --no-install-recommends jq firefox-esr tzdata \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
     && echo $TZ > /etc/timezone \
@@ -39,9 +39,8 @@ RUN mkdir /data \
 
 ENV LANG=C.UTF-8
 
-RUN OUTPUT=$(python3 firefox_driver_download.py | tail -n 1) \
-    && echo "Driver path: $OUTPUT" \
-    && mv $OUTPUT /usr/bin/geckodriver \
-    && chmod +x /usr/bin/geckodriver
+RUN OUTPUT=$(python3 firefox_driver_download.py)  \
+    && echo $OUTPUT  \
+    && mv $OUTPUT /usr/bin/geckodriver
 
 CMD ["python3","main.py"]

@@ -25,7 +25,7 @@ else
 fi
 
 # Define Dockerfile
-DOCKERFILE="Dockerfile-local"
+DOCKERFILE="Dockerfile"
 
 echo "Starting build and push for $REPO using Podman..."
 

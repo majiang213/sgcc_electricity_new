@@ -533,17 +533,55 @@ class DataFetcher:
     def _choose_current_userid(self, driver, userid_index):
         elements = driver.find_elements(By.CLASS_NAME, "button_confirm")
         if elements:
-            self._click_button(
-                driver,
-                By.XPATH,
-                f"""//*[@id="app"]/div/div[2]/div/div/div/div[2]/div[2]/div/button""",
+            try:
+                self._click_button(
+                    driver,
+                    By.XPATH,
+                    f"""//*[@id="app"]/div/div[2]/div/div/div/div[2]/div[2]/div/button""",
+                )
+            except Exception:
+                pass
+
+        try:
+            # 1. Click the select input to expand the dropdown
+            # Use CSS selector to find the input within .el-select wrapper
+            select_box = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable(
+                    (By.CSS_SELECTOR, ".el-select .el-input__inner")
+                )
             )
-        self._click_button(driver, By.CLASS_NAME, "el-input__suffix")
-        self._click_button(
-            driver,
-            By.XPATH,
-            f"/html/body/div[2]/div[1]/div[1]/ul/li[{userid_index + 1}]/span",
-        )
+            driver.execute_script("arguments[0].click();", select_box)
+
+            # 2. Wait for dropdown items to be visible
+            WebDriverWait(driver, 10).until(
+                EC.visibility_of_element_located(
+                    (By.CLASS_NAME, "el-select-dropdown__item")
+                )
+            )
+
+            # 3. Select the item by index
+            all_items = driver.find_elements(By.CLASS_NAME, "el-select-dropdown__item")
+            # Filter for visible items only, as Element UI might leave hidden nodes in DOM
+            visible_items = [item for item in all_items if item.is_displayed()]
+
+            if userid_index < len(visible_items):
+                target_item = visible_items[userid_index]
+                driver.execute_script("arguments[0].click();", target_item)
+                logging.info(f"Selected user index {userid_index} from dropdown.")
+            else:
+                logging.warning(
+                    f"Index {userid_index} out of bounds for user list (size {len(visible_items)})."
+                )
+
+        except Exception as e:
+            # Fallback/Error handling
+            if userid_index == 0:
+                logging.warning(
+                    f"Could not select first user (index 0), possibly single user environment. Details: {e}"
+                )
+            else:
+                logging.error(f"Failed to select user at index {userid_index}: {e}")
+                raise e
 
     def _get_all_data(self, driver, user_id, userid_index):
         balance = self._get_electric_balance(driver)

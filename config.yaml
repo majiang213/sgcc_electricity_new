@@ -1,5 +1,5 @@
 name: "SGCC Electricity"
-version: "v1.6.8-patch1"
+version: "v1.6.8-patch2"
 slug: "sgcc_electricity"
 description: "获取国网电费数据的插件 (已修复 1 月跨年 Bug)"
 url: "https://github.com/majiang213/sgcc_electricity_new"
