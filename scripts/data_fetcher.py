@@ -238,8 +238,17 @@ class DataFetcher:
 
             logging.info("Open Firefox.\r")
             service = FirefoxService()
-            if os.path.exists("/usr/bin/geckodriver"):
-                service = FirefoxService(executable_path="/usr/bin/geckodriver")
+            # 按优先级搜索 geckodriver 路径
+            geckodriver_paths = [
+                "/usr/bin/geckodriver",  # Docker / Linux 系统
+                "/opt/homebrew/bin/geckodriver",  # macOS ARM (M1/M2)
+                "/usr/local/bin/geckodriver",  # macOS Intel / Linux 手动安装
+            ]
+            for gd_path in geckodriver_paths:
+                if os.path.exists(gd_path):
+                    service = FirefoxService(executable_path=gd_path)
+                    logging.info(f"Using geckodriver at: {gd_path}")
+                    break
 
             driver = webdriver.Firefox(options=firefox_options, service=service)
             # 设置页面加载超时
@@ -477,12 +486,31 @@ class DataFetcher:
                 # switch to electricity charge balance page
                 driver.get(BALANCE_URL)
                 # 等待页面中的核心元素出现，避免死等
-                WebDriverWait(
-                    driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
-                ).until(EC.presence_of_element_located((By.CLASS_NAME, "num")))
+                # 改为等待更宽泛的容器，而不是具体的 .num，因为 .num 有时可能加载较慢或不存在
+                try:
+                    WebDriverWait(
+                        driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
+                    ).until(EC.presence_of_element_located((By.ID, "app")))
+                except Exception:
+                    logging.warning(
+                        "Main app container not found, page might handle it."
+                    )
+
                 self._choose_current_userid(driver, userid_index)
                 time.sleep(1)  # 切换用户后的 DOM 更新缓冲
                 current_userid = self._get_current_userid(driver)
+
+                # 如果获取失败，使用已知的 user_id 作为回退
+                if current_userid is None:
+                    # 保存调试现场
+                    debug_file = f"debug_failed_userid_{userid_index}.html"
+                    with open(debug_file, "w", encoding="utf-8") as f:
+                        f.write(driver.page_source)
+                    logging.warning(
+                        f"Could not get current user ID from page, fell back to known user_id: {user_id}. Dumped page to {debug_file}"
+                    )
+                    current_userid = user_id
+
                 if current_userid in self.IGNORE_USER_ID:
                     logging.info(
                         f"The user ID {current_userid} will be ignored in user_id_list"
@@ -512,6 +540,15 @@ class DataFetcher:
 
                     time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
             except Exception as e:
+                # 发生异常时保存页面源码
+                try:
+                    debug_file = f"debug_error_user_{userid_index}.html"
+                    with open(debug_file, "w", encoding="utf-8") as f:
+                        f.write(driver.page_source)
+                    logging.info(f"Dumped page source to {debug_file} due to error.")
+                except Exception:
+                    pass
+
                 if userid_index != len(user_id_list):
                     logging.info(
                         f"The current user {user_id} data fetching failed {e}, the next user data will be fetched."
@@ -524,11 +561,48 @@ class DataFetcher:
         driver.quit()
 
     def _get_current_userid(self, driver):
-        current_userid = driver.find_element(
-            By.XPATH,
-            '//*[@id="app"]/div/div/article/div/div/div[2]/div/div/div[1]/div[2]/div/div/div/div[2]/div/div[1]/div/ul/div/li[1]/span[2]',
-        ).text
-        return current_userid
+        """获取当前选中的用户户号。
+
+        针对树莓派优化：使用健壮的 CSS 选择器和显式等待，
+        避免绝对 XPath 导致的脆弱性问题。
+        """
+        try:
+            # 方案1：从 el-select 的 input 中获取当前选中值（最直接）
+            # 使用已配置的 POLL_FREQUENCY，对树莓派更友好
+            select_input = WebDriverWait(
+                driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
+            ).until(
+                EC.visibility_of_element_located(
+                    (By.CSS_SELECTOR, ".el-select .el-input__inner")
+                )
+            )
+            current_text = select_input.get_attribute("value") or ""
+
+            # 从文本中提取用户 ID（数字部分）
+            numbers = re.findall(r"[0-9]+", current_text)
+            if numbers:
+                logging.debug(f"Got current user ID from select input: {numbers[-1]}")
+                return numbers[-1]
+
+            # 方案2：如果 input value 为空，尝试从页面其他位置获取
+            # 查找包含户号的元素（通常在用户信息区域）
+            try:
+                # 尝试从页面文本中查找户号模式
+                page_text = driver.find_element(By.TAG_NAME, "body").text
+                # 户号通常是一串较长的数字
+                all_numbers = re.findall(r"\b\d{10,}\b", page_text)
+                if all_numbers:
+                    logging.debug(f"Got user ID from page text: {all_numbers[0]}")
+                    return all_numbers[0]
+            except Exception:
+                pass
+
+            logging.warning(f"Could not extract user ID from text: '{current_text}'")
+            return current_text if current_text else None
+
+        except Exception as e:
+            logging.warning(f"Failed to get current user ID: {e}")
+            return None
 
     def _choose_current_userid(self, driver, userid_index):
         elements = driver.find_elements(By.CLASS_NAME, "button_confirm")
@@ -769,7 +843,10 @@ class DataFetcher:
                 return -float(balance)
             else:
                 return float(balance)
-        except Exception:
+        except Exception as e:
+            logging.warning(
+                f"Failed to get electric balance (element '.num' not found or other error): {e}"
+            )
             return None
 
     def _get_yearly_data(self, driver):
