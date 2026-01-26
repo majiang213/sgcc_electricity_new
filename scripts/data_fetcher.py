@@ -833,20 +833,32 @@ class DataFetcher:
 
     def _get_electric_balance(self, driver):
         try:
-            # 等待余额数值可见
+            # 使用包含 "您的账户余额为" 的 XPath 定位 (适应新版页面结构)
+            # 结构示例: <p>您的账户余额为：<b class="cff8">9.93元</b></p>
+            xpath = "//p[contains(., '您的账户余额为')]/b"
+
             WebDriverWait(
                 driver, self.DRIVER_IMPLICITY_WAIT_TIME, self.POLL_FREQUENCY
-            ).until(EC.visibility_of_element_located((By.CLASS_NAME, "num")))
-            balance = driver.find_element(By.CLASS_NAME, "num").text
-            balance_text = driver.find_element(By.CLASS_NAME, "amttxt").text
-            if "欠费" in balance_text:
-                return -float(balance)
-            else:
-                return float(balance)
+            ).until(EC.visibility_of_element_located((By.XPATH, xpath)))
+
+            balance_element = driver.find_element(By.XPATH, xpath)
+            balance_text = balance_element.text
+
+            # 去除 "元" 后转换为浮点数
+            balance_value = float(balance_text.replace("元", "").strip())
+            return balance_value
+
         except Exception as e:
             logging.warning(
-                f"Failed to get electric balance (element '.num' not found or other error): {e}"
+                f"Failed to get electric balance (xpath '{xpath}' failed): {e}"
             )
+            # 尝试保留现场
+            try:
+                with open("debug_balance_fail.html", "w", encoding="utf-8") as f:
+                    f.write(driver.page_source)
+                logging.info("Dumped page source to debug_balance_fail.html")
+            except Exception:
+                pass
             return None
 
     def _get_yearly_data(self, driver):
